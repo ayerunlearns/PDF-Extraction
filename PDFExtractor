@@ -42,6 +42,7 @@ def create_subdirectories(base_path):
         os.makedirs(os.path.join(base_path, 'ocr'), exist_ok=True)
         os.makedirs(os.path.join(base_path, 'tables'), exist_ok=True)
         os.makedirs(os.path.join(base_path, 'image_pages'), exist_ok=True)
+        print(f"Subdirectories text, images, ocr, tables, image_pages created")
     except Exception as e:
         print(f"Error creating subdirectories: {e}")
 
@@ -143,7 +144,7 @@ def draw_table_on_image(table, image_size=(1200, 800), font_size=16, padding=10)
             draw.text((x_start, y_start), str(value), font=font_regular, fill=(0, 0, 0))  # Black text for rows
             x_start += col_widths[col_idx]
         y_start += row_height
-
+            
     return table_image
 
 def extract_images_from_pdf(pdf_path, output_base_path):
@@ -178,7 +179,7 @@ def extract_images_from_pdf(pdf_path, output_base_path):
                 with open(image_path, "wb") as image_file:
                     image_file.write(image_bytes)
                 image_count += 1
-                print(f"Saved image: {image_path}")
+                print(f"Saved image: {image_filename}")
             except Exception as e:
                 print(f"Error saving image {image_count + 1}: {e}")
 
@@ -188,8 +189,6 @@ def extract_images_from_pdf(pdf_path, output_base_path):
         print(f"Image Extraction - No images found in {pdf_name}.")
     else:
         print(f"Image Extraction - Extracted {image_count} images from {pdf_name}.")
-
-
 
 def extract_text_from_pdf(pdf_path, char_limit, output_base_path, progress_var, total_files, stats):
     """Extract text, images, and tables from PDF."""
@@ -228,10 +227,12 @@ def extract_text_from_pdf(pdf_path, char_limit, output_base_path, progress_var, 
                     f.write(chunk)
                 text_count += 1  # Increment text file count
 
-        # Extract images and perform OCR
+        # Extract page images and perform OCR
         images = convert_from_path(pdf_path)
+        pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
         for idx, image in enumerate(images):
             image_path = os.path.join(pdf_output_base_path, 'image_pages', f'{pdf_name}_page_{idx + 1}.png')
+            image_pagename = f"{pdf_name}_pageimage{idx + 1}.png"
             try:
                 image.save(image_path, 'PNG')
                 image_count += 1  # Increment image count
@@ -241,6 +242,7 @@ def extract_text_from_pdf(pdf_path, char_limit, output_base_path, progress_var, 
 
                 with open(os.path.join(pdf_output_base_path, 'ocr', f'{pdf_name}_image_{idx + 1}_ocr.txt'), 'w', encoding='utf-8') as f:
                     f.write(ocr_text)
+                    print(f"Saved page image - {image_pagename} from {pdf_name}.")
             except Exception as e:
                 print(f"Error processing image {idx + 1}: {e}")
 
@@ -260,9 +262,10 @@ def extract_text_from_pdf(pdf_path, char_limit, output_base_path, progress_var, 
                 table_image = draw_table_on_image(table)
                 table_image_path = os.path.join(pdf_output_base_path, 'tables', f'{pdf_name}_table_{idx}.png')
                 table_image.save(table_image_path)
+                table_name = f"{pdf_name}_table{idx + 1}.png"
 
                 table_count += 1  # Increment table count
-
+                print(f"Saved table image - {table_name} from {pdf_name}.")
             except Exception as e:
                 print(f"Error processing table {idx + 1}: {e}")
 
@@ -272,12 +275,12 @@ def extract_text_from_pdf(pdf_path, char_limit, output_base_path, progress_var, 
         stats['text_files'] += text_count
         stats['images_extracted'] += image_count
         stats['tables_extracted'] += table_count
-
+        text_name = f"{pdf_name}_text{text_count + 1}.txt"
         # Update progress
         progress_var.set((progress_var.get() + (1 / total_files) * 100))  # Update progress by percentage
-
+        print(f"Saved text - {text_name} from {pdf_name}")
     except Exception as e:
-        print(f"Error processing PDF '{pdf_path}': {e}")
+        print(f"Error processing PDF '{pdf_name}': {e}")
         
 # Move PDFs to Output folder        
 def move_processed_pdf(pdf_path, output_folder):
@@ -294,7 +297,7 @@ def move_processed_pdf(pdf_path, output_folder):
 
         # Move the processed PDF to the subfolder
         shutil.move(pdf_path, os.path.join(pdf_subfolder, os.path.basename(pdf_path)))  # Move PDF with its original name
-        print(f"Moved {pdf_path} to {pdf_subfolder}")
+        print(f"Moved {pdf_name} to {pdf_subfolder}")
         
     except Exception as e:
         print(f"Error moving {pdf_path}: {e}")
