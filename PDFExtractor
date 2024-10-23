@@ -1,0 +1,422 @@
+import os
+import json
+import re
+import pandas as pd
+from pdf2image import convert_from_path
+import pytesseract
+from PIL import Image, ImageDraw, ImageFont
+import fitz  # PyMuPDF
+from tabula import read_pdf
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+import time  # Import time for processing duration
+from io import BytesIO
+import PyPDF2
+import shutil  # Add this import to handle moving files
+
+# Set the path for the Tesseract executable
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
+CONFIG_FILE = 'config.json'
+
+
+def load_config():
+    """Load configuration settings from a JSON file."""
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+
+def save_config(config):
+    """Save configuration settings to a JSON file."""
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f)
+
+
+def create_subdirectories(base_path):
+    """Create subdirectories for text, images, OCR outputs, and tables."""
+    try:
+        os.makedirs(os.path.join(base_path, 'text'), exist_ok=True)
+        os.makedirs(os.path.join(base_path, 'images'), exist_ok=True)
+        os.makedirs(os.path.join(base_path, 'ocr'), exist_ok=True)
+        os.makedirs(os.path.join(base_path, 'tables'), exist_ok=True)
+        os.makedirs(os.path.join(base_path, 'image_pages'), exist_ok=True)
+    except Exception as e:
+        print(f"Error creating subdirectories: {e}")
+
+
+def clean_ocr_text(ocr_text):
+    """Remove common page number formats from OCR text."""
+    cleaned_text = re.sub(r'(?i)Page \d+|p\.?\s*\d+|(\d+\s+of\s+\d+)|(\d+/\d+)', '', ocr_text)
+    cleaned_text = re.sub(r'\n+', '\n', cleaned_text)  # Remove multiple newlines
+    return cleaned_text.strip()
+
+
+def split_text(text, limit):
+    """Split text into chunks of a specified character limit without splitting sentences."""
+    chunks = []
+    current_chunk = ""
+
+    sentences = re.split(r'(?<=[.!?]) +', text)  # Split by sentence boundaries
+
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) + 1 > limit:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = sentence
+        else:
+            current_chunk += (" " + sentence).strip()
+
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+
+    return chunks
+
+
+def format_table_to_string(table):
+    """Format the DataFrame into a readable string format."""
+    if table.empty:
+        return "No data available.\n"
+
+    formatted_rows = []
+    headers = table.columns.tolist()
+    max_lengths = [max(len(str(item)) for item in table[col].values) for col in headers]
+    max_lengths = [max(max_len, len(header)) for max_len, header in zip(max_lengths, headers)]
+
+    header_line = " | ".join(f"{header:<{max_len}}" for header, max_len in zip(headers, max_lengths))
+    formatted_rows.append(header_line)
+    formatted_rows.append("-" * len(header_line))  # Underline header
+
+    for index, row in table.iterrows():
+        formatted_row = " | ".join(f"{str(value):<{max_lengths[i]}}" for i, value in enumerate(row))
+        formatted_rows.append(formatted_row)
+
+    return "\n".join(formatted_rows) + "\n"
+
+
+def draw_table_on_image(table, image_size=(1200, 800), font_size=16, padding=10):
+    """Draw a table on an image with dynamic column widths, bold headers, white background, and black text."""
+    # Load regular and bold fonts
+    try:
+        font_regular = ImageFont.truetype('arial.ttf', font_size)
+        font_bold = ImageFont.truetype('arialbd.ttf', font_size)  # Use 'arialbd.ttf' for bold font
+    except IOError:
+        font_regular = ImageFont.load_default()  # Fallback to default font if Arial is unavailable
+        font_bold = font_regular  # Use regular font if bold is unavailable
+
+    # Create a dummy image for text size calculation
+    temp_image = Image.new('RGB', image_size)
+    draw = ImageDraw.Draw(temp_image)
+
+    # Calculate dynamic column widths based on the longest text in each column
+    col_widths = []
+    for col in table.columns:
+        max_width = max(draw.textbbox((0, 0), str(val), font=font_regular)[2] for val in table[col].values)
+        col_widths.append(max(max_width, draw.textbbox((0, 0), str(col), font=font_bold)[2]) + padding)
+
+    total_table_width = sum(col_widths) + (len(col_widths) - 1) * padding
+
+    # Adjust image size if the table width exceeds the default image size
+    image_width = max(image_size[0], total_table_width + 2 * padding)
+    image_height = image_size[1] + len(table) * (font_size + padding)
+
+    # Create the final image with adjusted width and height and white background
+    table_image = Image.new('RGB', (image_width, image_height), color=(255, 255, 255))  # White background
+    draw = ImageDraw.Draw(table_image)
+
+    # Set initial drawing coordinates
+    x_start = padding
+    y_start = padding
+    row_height = font_size + padding
+
+    # Draw table headers in bold with black text
+    for col_idx, col in enumerate(table.columns):
+        draw.text((x_start, y_start), str(col), font=font_bold, fill=(0, 0, 0))  # Black text for headers
+        x_start += col_widths[col_idx]
+
+    # Draw table rows with black text
+    y_start += row_height
+    for i, row in table.iterrows():
+        x_start = padding
+        for col_idx, value in enumerate(row):
+            draw.text((x_start, y_start), str(value), font=font_regular, fill=(0, 0, 0))  # Black text for rows
+            x_start += col_widths[col_idx]
+        y_start += row_height
+
+    return table_image
+
+def extract_images_from_pdf(pdf_path, output_base_path):
+    # Get the PDF name without extension
+    pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
+    
+    # Create a folder with the PDF name inside the output base path
+    output_folder = os.path.join(output_base_path, pdf_name, 'images')
+    os.makedirs(output_folder, exist_ok=True)
+    
+    # Open the PDF
+    pdf_document = fitz.open(pdf_path)
+    
+    # Iterate through the pages and extract images
+    image_count = 0
+    for page_num in range(len(pdf_document)):
+        page = pdf_document.load_page(page_num)
+        images = page.get_images(full=True)
+        
+        for img_index, img in enumerate(images):
+            xref = img[0]
+            base_image = pdf_document.extract_image(xref)
+            image_bytes = base_image["image"]
+            image_ext = base_image["ext"]
+            
+            # Create a file name for each image
+            image_filename = f"{pdf_name}_image{image_count + 1}.{image_ext}"
+            image_path = os.path.join(output_folder, image_filename)
+            
+            try:
+                # Save the image
+                with open(image_path, "wb") as image_file:
+                    image_file.write(image_bytes)
+                image_count += 1
+                print(f"Saved image: {image_path}")
+            except Exception as e:
+                print(f"Error saving image {image_count + 1}: {e}")
+
+    pdf_document.close()
+    
+    if image_count == 0:
+        print(f"Image Extraction - No images found in {pdf_name}.")
+    else:
+        print(f"Image Extraction - Extracted {image_count} images from {pdf_name}.")
+
+
+
+def extract_text_from_pdf(pdf_path, char_limit, output_base_path, progress_var, total_files, stats):
+    """Extract text, images, and tables from PDF."""
+    start_time = time.time()  # Start the timer
+    text_count = 0
+    image_count = 0
+    table_count = 0
+
+    try:
+        if not os.path.exists(pdf_path):
+            messagebox.showerror("Error", f"The file '{pdf_path}' does not exist.")
+            return
+
+        # Create subdirectories specific to each PDF file
+        pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
+        pdf_output_base_path = os.path.join(output_base_path, pdf_name)
+        os.makedirs(pdf_output_base_path, exist_ok=True)
+        create_subdirectories(pdf_output_base_path)
+
+        # Extract text from the PDF
+        with fitz.open(pdf_path) as doc:
+            text_parts = []
+            for page in doc:
+                text = page.get_text()
+                text = re.sub(r'Page \d+\/\d+', '', text)
+                text = re.sub(r'\b\d+\s*\/\s*\d+\b', '', text, flags=re.IGNORECASE)
+
+                if text:
+                    text_parts.append(text)
+
+            full_text = "\n".join(text_parts)
+            text_chunks = split_text(full_text, char_limit)
+
+            for idx, chunk in enumerate(text_chunks):
+                with open(os.path.join(pdf_output_base_path, 'text', f'{pdf_name}_part_{idx + 1}.txt'), 'w', encoding='utf-8') as f:
+                    f.write(chunk)
+                text_count += 1  # Increment text file count
+
+        # Extract images and perform OCR
+        images = convert_from_path(pdf_path)
+        for idx, image in enumerate(images):
+            image_path = os.path.join(pdf_output_base_path, 'image_pages', f'{pdf_name}_page_{idx + 1}.png')
+            try:
+                image.save(image_path, 'PNG')
+                image_count += 1  # Increment image count
+
+                ocr_text = pytesseract.image_to_string(image)
+                ocr_text = clean_ocr_text(ocr_text)
+
+                with open(os.path.join(pdf_output_base_path, 'ocr', f'{pdf_name}_image_{idx + 1}_ocr.txt'), 'w', encoding='utf-8') as f:
+                    f.write(ocr_text)
+            except Exception as e:
+                print(f"Error processing image {idx + 1}: {e}")
+
+        # Extract and process tables
+        tables = read_pdf(pdf_path, pages='all')
+        for idx, table in enumerate(tables):
+            try:
+                if not isinstance(table, pd.DataFrame) or len(table) == 0:
+                    continue
+
+                # Save table as text
+                table_text = format_table_to_string(table)
+                with open(os.path.join(pdf_output_base_path, 'tables', f'{pdf_name}_table_{idx}.txt'), 'w', encoding='utf-8') as f:
+                    f.write(table_text)
+
+                # Create table image
+                table_image = draw_table_on_image(table)
+                table_image_path = os.path.join(pdf_output_base_path, 'tables', f'{pdf_name}_table_{idx}.png')
+                table_image.save(table_image_path)
+
+                table_count += 1  # Increment table count
+
+            except Exception as e:
+                print(f"Error processing table {idx + 1}: {e}")
+
+        # Update processing stats
+        elapsed_time = time.time() - start_time
+        stats['processing_time'] += elapsed_time
+        stats['text_files'] += text_count
+        stats['images_extracted'] += image_count
+        stats['tables_extracted'] += table_count
+
+        # Update progress
+        progress_var.set((progress_var.get() + (1 / total_files) * 100))  # Update progress by percentage
+
+    except Exception as e:
+        print(f"Error processing PDF '{pdf_path}': {e}")
+        
+# Move PDFs to Output folder        
+def move_processed_pdf(pdf_path, output_folder):
+    """
+    Move processed PDF files to a subfolder named after the PDF file inside the specified output folder.
+    """
+    try:
+        # Get the PDF name without the extension
+        pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
+
+        # Create a subfolder in the output folder based on the PDF name
+        pdf_subfolder = os.path.join(output_folder, pdf_name)
+        os.makedirs(pdf_subfolder, exist_ok=True)
+
+        # Move the processed PDF to the subfolder
+        shutil.move(pdf_path, os.path.join(pdf_subfolder, os.path.basename(pdf_path)))  # Move PDF with its original name
+        print(f"Moved {pdf_path} to {pdf_subfolder}")
+        
+    except Exception as e:
+        print(f"Error moving {pdf_path}: {e}")
+
+def start_processing():
+    """Start the PDF processing based on user inputs."""
+    folder_directory = folder_entry.get()
+    char_limit = char_limit_entry.get()
+
+    # Validate inputs
+    if not os.path.isdir(folder_directory):
+        messagebox.showerror("Error", "The specified directory does not exist.")
+        return
+
+    try:
+        char_limit = int(char_limit) if char_limit else 1000  # Default limit if none set
+        if char_limit <= 0:
+            raise ValueError("Character limit must be a positive integer.")
+    except ValueError as e:
+        messagebox.showerror("Input Error", str(e))
+        return
+
+    # Load saved configuration
+    config = load_config()
+    if 'folder_directory' not in config or 'char_limit' not in config:
+        config['folder_directory'] = folder_directory
+        config['char_limit'] = char_limit
+        save_config(config)
+
+    # Process each PDF in the specified directory
+    pdf_files = [f for f in os.listdir(folder_directory) if f.lower().endswith('.pdf')]
+    if not pdf_files:
+        messagebox.showinfo("Info", "No PDF files found in the specified directory.")
+        return
+
+    # Initialize progress bar
+    total_files = len(pdf_files)
+    progress_var.set(0)
+    progress_bar['maximum'] = 100
+    progress_bar.grid(row=6, column=0, columnspan=3, padx=10, pady=20)  # Moved to row 6
+
+    # Initialize stats dictionary
+    stats = {
+        'processing_time': 0.0,
+        'text_files': 0,
+        'images_extracted': 0,
+        'tables_extracted': 0
+    }
+
+    for pdf_file in pdf_files:
+        pdf_path = os.path.join(folder_directory, pdf_file)
+        output_base_path = folder_directory  # Keep base output path as the folder directory
+        extract_text_from_pdf(pdf_path, char_limit, output_base_path, progress_var, total_files, stats)
+        extract_images_from_pdf(pdf_path, output_base_path)  # Pass output_base_path here
+        move_processed_pdf(pdf_path, folder_directory)
+
+    # Update GUI with stats
+    processing_time_label.config(text=f"Total Processing Time: {stats['processing_time']:.2f} seconds")
+    text_files_label.config(text=f"Text Files Extracted: {stats['text_files']}")
+    images_extracted_label.config(text=f"Images Extracted: {stats['images_extracted']}")
+    tables_extracted_label.config(text=f"Tables Extracted: {stats['tables_extracted']}")
+
+    messagebox.showinfo("Success", "Processing complete!")
+
+
+def save_settings():
+    """Save current settings to the configuration file."""
+    config = {
+        'folder_directory': folder_entry.get(),
+        'char_limit': char_limit_entry.get()
+    }
+    save_config(config)
+    messagebox.showinfo("Settings Saved", "Settings have been saved successfully!")
+
+
+# Create the main application window
+app = tk.Tk()
+app.title("PDF Processor")
+app.geometry("700x400")  # Set the window size to 800x600
+
+# Create and place the input fields and labels
+tk.Label(app, text="Folder Directory:", font=('Arial', 12)).grid(row=0, column=0, padx=10, pady=10)
+folder_entry = tk.Entry(app, width=50, font=('Arial', 12))  # Increased width
+folder_entry.grid(row=0, column=1, padx=10, pady=10)
+
+tk.Button(app, text="Browse", command=lambda: folder_entry.insert(0, filedialog.askdirectory()), font=('Arial', 12)).grid(row=0, column=2, padx=10, pady=10)
+
+tk.Label(app, text="Character Limit:", font=('Arial', 12)).grid(row=1, column=0, padx=10, pady=10)
+char_limit_entry = tk.Entry(app, width=50, font=('Arial', 12))  # Increased width
+char_limit_entry.grid(row=1, column=1, padx=10, pady=10)
+
+# Create labels for processing statistics with larger font
+processing_time_label = tk.Label(app, text="Total Processing Time: 0 seconds", font=('Arial', 12))
+processing_time_label.grid(row=2, column=0, columnspan=3, padx=10, pady=5)
+
+text_files_label = tk.Label(app, text="Text Files Extracted: 0", font=('Arial', 12))
+text_files_label.grid(row=3, column=0, columnspan=3, padx=10, pady=5)
+
+images_extracted_label = tk.Label(app, text="Images Extracted: 0", font=('Arial', 12))
+images_extracted_label.grid(row=4, column=0, columnspan=3, padx=10, pady=5)
+
+tables_extracted_label = tk.Label(app, text="Tables Extracted: 0", font=('Arial', 12))
+tables_extracted_label.grid(row=5, column=0, columnspan=3, padx=10, pady=5)
+
+# Create and place the progress bar
+progress_var = tk.DoubleVar()
+progress_bar = ttk.Progressbar(app, variable=progress_var, length=500)  # Decreased length for better fit
+progress_bar.grid(row=6, column=0, columnspan=3, padx=10, pady=20)  # Positioned above the button
+
+# Save Settings Button
+tk.Button(app, text="Save Settings", command=save_settings, font=('Arial', 12)).grid(row=7, column=0, padx=10, pady=5)  # Reduced pady
+
+# Start Processing Button
+tk.Button(app, text="Start Processing", command=start_processing, font=('Arial', 12)).grid(row=7, column=1, padx=10, pady=5)  # Reduced pady
+
+
+# Load saved configuration to pre-fill inputs
+config = load_config()
+if 'folder_directory' in config:
+    folder_entry.insert(0, config['folder_directory'])
+if 'char_limit' in config:
+    char_limit_entry.insert(0, str(config['char_limit']))
+
+# Run the application
+app.mainloop()
