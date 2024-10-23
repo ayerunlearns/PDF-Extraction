@@ -9,4 +9,4 @@ Installation:
 
 How to use:
   - cd 'path to where the script is'
-  - python 'name of script'
+  - python PDFExtractor.py'
