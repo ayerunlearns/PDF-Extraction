@@ -3,7 +3,7 @@ This Python script extracts text, images, and tables from a PDF file, organizing
 
 You can specify a character limit to split PDFs into multiple text files. Additionally, you can designate a default folder location to process all PDFs within that directory.
 <BR><BR>
-<img src = "https://github.com/ayerunlearns/personal/blob/fa7e274c67c3946f6b4e55dfbbbf99eb1e2f80e7/PDF%20ExtractorPDF/Extractor.png">
+<img src = "https://github.com/ayeruntech/personal/blob/fa7e274c67c3946f6b4e55dfbbbf99eb1e2f80e7/PDF%20ExtractorPDF/Extractor.png">
 <BR><BR>
 Installation:
   - Install required libraries: pdf2image, pytesseract, Pillow, PyMuPDF, tabula-py, PyPDF2
